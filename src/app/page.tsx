@@ -1,12 +1,11 @@
 "use client";
 
+
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useState, useEffect } from "react";
 import * as anchor from "@coral-xyz/anchor";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import WalletButton from "@/components/WalletButton";
-
-// Import your IDL
 import idl from "@/idl/meme_coin_program.json";
 
 const PROGRAM_ID = new PublicKey(
@@ -19,7 +18,6 @@ export default function Home() {
 
   const [mounted, setMounted] = useState(false);
 
-  // Form states
   const [createForm, setCreateForm] = useState({
     name: "",
     symbol: "",
@@ -29,11 +27,6 @@ export default function Home() {
     pricePerToken: 1000000, // 0.001 SOL in lamports
   });
 
-  const [buyForm, setBuyForm] = useState({
-    coinName: "",
-    amount: 1,
-  });
-
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
 
@@ -41,23 +34,45 @@ export default function Home() {
     setMounted(true);
   }, []);
 
-  // Get Anchor program instance
-  const getProgram = () => {
-    if (!wallet.wallet?.adapter) return null;
+const getProgram = () => {
+  if (
+    !wallet.publicKey ||
+    !wallet.signTransaction ||
+    !wallet.signAllTransactions
+  ) {
+    console.error("Wallet not fully connected");
+    return null;
+  }
 
-    const provider = new anchor.AnchorProvider(
-      connection,
-      wallet as any,
-      anchor.AnchorProvider.defaultOptions()
-    );
+  const provider = new anchor.AnchorProvider(
+    connection,
+    {
+      publicKey: wallet.publicKey,
+      signAllTransactions: wallet.signAllTransactions,
+      signTransaction: wallet.signTransaction,
+    } as anchor.Wallet,
+    anchor.AnchorProvider.defaultOptions()
+  );
+  console.log("Provider:", provider);
+  
+  return new anchor.Program(idl as anchor.Idl, PROGRAM_ID, provider);
+};
 
-    return new anchor.Program(idl as any, PROGRAM_ID, provider);
-  };
 
-  // Create a new meme coin
   const createMemeCoin = async () => {
     if (!wallet.publicKey) {
       setStatus("Please connect your wallet first");
+      return;
+    }
+
+    if (
+      !createForm.name ||
+      !createForm.symbol ||
+      !createForm.uri ||
+      isNaN(createForm.initialSupply) ||
+      isNaN(createForm.pricePerToken)
+    ) {
+      setStatus("Please fill out all fields with valid values.");
       return;
     }
 
@@ -68,10 +83,8 @@ export default function Home() {
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
-      // Generate mint keypair
       const mint = anchor.web3.Keypair.generate();
 
-      // Find PDA for meme coin account
       const [memeCoinPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("meme_coin"), Buffer.from(createForm.name)],
         PROGRAM_ID
@@ -83,8 +96,8 @@ export default function Home() {
           createForm.symbol,
           createForm.uri,
           createForm.decimals,
-          new anchor.BN(createForm.initialSupply),
-          new anchor.BN(createForm.pricePerToken)
+          new anchor.BN(Number(createForm.initialSupply)),
+          new anchor.BN(Number(createForm.pricePerToken))
         )
         .accounts({
           memeCoin: memeCoinPda,
@@ -97,10 +110,9 @@ export default function Home() {
         .signers([mint])
         .rpc();
 
-      setStatus(`Meme coin created! TX: ${tx}`);
+      setStatus(`✅ Meme coin created! TX: ${tx}`);
       console.log("Transaction:", tx);
 
-      // Reset form
       setCreateForm({
         name: "",
         symbol: "",
@@ -109,9 +121,9 @@ export default function Home() {
         initialSupply: 1000000,
         pricePerToken: 1000000,
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating meme coin:", error);
-      setStatus(`Error: ${error}`);
+      setStatus(`❌ Error: ${error.message || error}`);
     } finally {
       setLoading(false);
     }
@@ -133,7 +145,6 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-8">
       <div className="max-w-6xl mx-auto">
-        {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-5xl font-bold text-white mb-4">
             🚀 Meme Coin Factory
@@ -144,14 +155,12 @@ export default function Home() {
           <WalletButton />
         </div>
 
-        {/* Status */}
         {status && (
           <div className="bg-blue-800/50 border border-blue-400 rounded-lg p-4 mb-8 text-center">
             <p className="text-white">{status}</p>
           </div>
         )}
 
-        {/* Create Meme Coin */}
         <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
           <h2 className="text-3xl font-bold text-white mb-6">
             Create New Meme Coin
@@ -168,8 +177,7 @@ export default function Home() {
                 onChange={(e) =>
                   setCreateForm({ ...createForm, name: e.target.value })
                 }
-                placeholder="Doge to the Moon"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white"
               />
             </div>
 
@@ -183,8 +191,7 @@ export default function Home() {
                 onChange={(e) =>
                   setCreateForm({ ...createForm, symbol: e.target.value })
                 }
-                placeholder="MOON"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white"
               />
             </div>
 
@@ -198,8 +205,7 @@ export default function Home() {
                 onChange={(e) =>
                   setCreateForm({ ...createForm, uri: e.target.value })
                 }
-                placeholder="https://example.com/metadata.json"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white"
               />
             </div>
 
@@ -216,14 +222,14 @@ export default function Home() {
                     initialSupply: parseInt(e.target.value),
                   })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white"
               />
             </div>
 
             <div className="md:col-span-2">
               <label className="block text-white font-medium mb-2">
-                Price per Token (lamports) - Current:{" "}
-                {createForm.pricePerToken / LAMPORTS_PER_SOL} SOL
+                Price per Token (lamports) -{" "}
+                {(createForm.pricePerToken / LAMPORTS_PER_SOL).toFixed(6)} SOL
               </label>
               <input
                 type="number"
@@ -234,7 +240,7 @@ export default function Home() {
                     pricePerToken: parseInt(e.target.value),
                   })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white"
               />
             </div>
           </div>
@@ -248,7 +254,6 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Network Info */}
         <div className="bg-yellow-500/20 border border-yellow-400 rounded-lg p-4 text-center">
           <p className="text-yellow-200">
             🔧 <strong>Development Mode:</strong> Connected to Solana Devnet
