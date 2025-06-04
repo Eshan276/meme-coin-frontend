@@ -78,10 +78,7 @@ export default function Home() {
 
   // Get Anchor program instance
   const getProgram = () => {
-    if (!wallet.wallet?.adapter) {
-      console.error("Wallet adapter is not initialized");
-      return null;
-    }
+    if (!wallet.wallet?.adapter) return null;
 
     const provider = new anchor.AnchorProvider(
       connection,
@@ -89,19 +86,9 @@ export default function Home() {
       anchor.AnchorProvider.defaultOptions()
     );
 
-    console.log("Provider:", provider);
-    console.log("IDL JSON:", idlJson);
-    console.log("PROGRAM_ID:", PROGRAM_ID.toString());
-
-    try {
-      const program = new anchor.Program(idlJson as any, PROGRAM_ID, provider);
-      console.log("Program initialized successfully:", program);
-      return program;
-    } catch (error) {
-      console.error("Error initializing program:", error);
-      return null;
-    }
+    return new anchor.Program(idl as any, PROGRAM_ID, provider);
   };
+
   // Create a new meme coin
   const createMemeCoin = async () => {
     if (!wallet.publicKey) {
@@ -125,42 +112,27 @@ export default function Home() {
         PROGRAM_ID
       );
 
-      let tx: string | undefined;
+      const tx = await program.methods
+        .createMemeCoin(
+          createForm.name,
+          createForm.symbol,
+          createForm.uri,
+          createForm.decimals,
+          new anchor.BN(createForm.initialSupply),
+          new anchor.BN(createForm.pricePerToken)
+        )
+        .accounts({
+          memeCoin: memeCoinPda,
+          mint: mint.publicKey,
+          creator: wallet.publicKey,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([mint])
+        .rpc();
 
-      try {
-        tx = await program.methods
-          .createMemeCoin(
-            createForm.name,
-            createForm.symbol,
-            createForm.uri,
-            createForm.decimals,
-            new anchor.BN(createForm.initialSupply),
-            new anchor.BN(createForm.pricePerToken)
-          )
-          .accounts({
-            memeCoin: memeCoinPda,
-            mint: mint.publicKey,
-            creator: wallet.publicKey,
-            tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-          })
-          .signers([mint])
-          .rpc();
-
-        console.log("Transaction successful:", tx);
-      } catch (error) {
-        console.error("Transaction failed:", error);
-        if (error instanceof Error && 'logs' in error) {
-          console.error("Transaction logs:", (error as any).logs);
-        }
-      }
-
-      if (tx) {
-        setStatus(`Meme coin created! TX: ${tx}`);
-      } else {
-        setStatus("Meme coin creation failed.");
-      }
+      setStatus(`Meme coin created! TX: ${tx}`);
       console.log("Transaction:", tx);
 
       // Reset form
