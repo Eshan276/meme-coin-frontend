@@ -1,103 +1,263 @@
-import Image from "next/image";
+"use client";
+
+import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import { useState, useEffect } from "react";
+import * as anchor from "@coral-xyz/anchor";
+import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import WalletButton from "@/components/WalletButton";
+
+// Import your IDL
+import idl from "@/idl/meme_coin_program.json";
+
+const PROGRAM_ID = new PublicKey(
+  "5ZCsDZAV9oH7Souj6UWtX3Q94ZrmPkVF5MVQuzmDd66X"
+);
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const { connection } = useConnection();
+  const wallet = useWallet();
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  const [mounted, setMounted] = useState(false);
+
+  // Form states
+  const [createForm, setCreateForm] = useState({
+    name: "",
+    symbol: "",
+    uri: "",
+    decimals: 9,
+    initialSupply: 1000000,
+    pricePerToken: 1000000, // 0.001 SOL in lamports
+  });
+
+  const [buyForm, setBuyForm] = useState({
+    coinName: "",
+    amount: 1,
+  });
+
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Get Anchor program instance
+  const getProgram = () => {
+    if (!wallet.wallet?.adapter) return null;
+
+    const provider = new anchor.AnchorProvider(
+      connection,
+      wallet as any,
+      anchor.AnchorProvider.defaultOptions()
+    );
+
+    return new anchor.Program(idl as any, PROGRAM_ID, provider);
+  };
+
+  // Create a new meme coin
+  const createMemeCoin = async () => {
+    if (!wallet.publicKey) {
+      setStatus("Please connect your wallet first");
+      return;
+    }
+
+    setLoading(true);
+    setStatus("Creating meme coin...");
+
+    try {
+      const program = getProgram();
+      if (!program) throw new Error("Program not initialized");
+
+      // Generate mint keypair
+      const mint = anchor.web3.Keypair.generate();
+
+      // Find PDA for meme coin account
+      const [memeCoinPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("meme_coin"), Buffer.from(createForm.name)],
+        PROGRAM_ID
+      );
+
+      const tx = await program.methods
+        .createMemeCoin(
+          createForm.name,
+          createForm.symbol,
+          createForm.uri,
+          createForm.decimals,
+          new anchor.BN(createForm.initialSupply),
+          new anchor.BN(createForm.pricePerToken)
+        )
+        .accounts({
+          memeCoin: memeCoinPda,
+          mint: mint.publicKey,
+          creator: wallet.publicKey,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([mint])
+        .rpc();
+
+      setStatus(`Meme coin created! TX: ${tx}`);
+      console.log("Transaction:", tx);
+
+      // Reset form
+      setCreateForm({
+        name: "",
+        symbol: "",
+        uri: "",
+        decimals: 9,
+        initialSupply: 1000000,
+        pricePerToken: 1000000,
+      });
+    } catch (error) {
+      console.error("Error creating meme coin:", error);
+      setStatus(`Error: ${error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!mounted) {
+    return (
+      <main className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-8">
+        <div className="max-w-6xl mx-auto text-center">
+          <h1 className="text-5xl font-bold text-white mb-4">
+            🚀 Meme Coin Factory
+          </h1>
+          <p className="text-xl text-gray-300">Loading...</p>
         </div>
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+    );
+  }
+
+  return (
+    <main className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-8">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-12">
+          <h1 className="text-5xl font-bold text-white mb-4">
+            🚀 Meme Coin Factory
+          </h1>
+          <p className="text-xl text-gray-300 mb-8">
+            Create, buy, and sell meme coins on Solana Devnet
+          </p>
+          <WalletButton />
+        </div>
+
+        {/* Status */}
+        {status && (
+          <div className="bg-blue-800/50 border border-blue-400 rounded-lg p-4 mb-8 text-center">
+            <p className="text-white">{status}</p>
+          </div>
+        )}
+
+        {/* Create Meme Coin */}
+        <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
+          <h2 className="text-3xl font-bold text-white mb-6">
+            Create New Meme Coin
+          </h2>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label className="block text-white font-medium mb-2">
+                Coin Name
+              </label>
+              <input
+                type="text"
+                value={createForm.name}
+                onChange={(e) =>
+                  setCreateForm({ ...createForm, name: e.target.value })
+                }
+                placeholder="Doge to the Moon"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-white font-medium mb-2">
+                Symbol
+              </label>
+              <input
+                type="text"
+                value={createForm.symbol}
+                onChange={(e) =>
+                  setCreateForm({ ...createForm, symbol: e.target.value })
+                }
+                placeholder="MOON"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-white font-medium mb-2">
+                Metadata URI
+              </label>
+              <input
+                type="text"
+                value={createForm.uri}
+                onChange={(e) =>
+                  setCreateForm({ ...createForm, uri: e.target.value })
+                }
+                placeholder="https://example.com/metadata.json"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-white font-medium mb-2">
+                Initial Supply
+              </label>
+              <input
+                type="number"
+                value={createForm.initialSupply}
+                onChange={(e) =>
+                  setCreateForm({
+                    ...createForm,
+                    initialSupply: parseInt(e.target.value),
+                  })
+                }
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="block text-white font-medium mb-2">
+                Price per Token (lamports) - Current:{" "}
+                {createForm.pricePerToken / LAMPORTS_PER_SOL} SOL
+              </label>
+              <input
+                type="number"
+                value={createForm.pricePerToken}
+                onChange={(e) =>
+                  setCreateForm({
+                    ...createForm,
+                    pricePerToken: parseInt(e.target.value),
+                  })
+                }
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          <button
+            onClick={createMemeCoin}
+            disabled={loading || !wallet.connected}
+            className="mt-6 w-full bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 disabled:from-gray-500 disabled:to-gray-600 text-white font-bold py-4 px-8 rounded-lg transition-all"
+          >
+            {loading ? "Creating..." : "Create Meme Coin 🚀"}
+          </button>
+        </div>
+
+        {/* Network Info */}
+        <div className="bg-yellow-500/20 border border-yellow-400 rounded-lg p-4 text-center">
+          <p className="text-yellow-200">
+            🔧 <strong>Development Mode:</strong> Connected to Solana Devnet
+          </p>
+          <p className="text-yellow-200 text-sm mt-2">
+            Program ID: {PROGRAM_ID.toString()}
+          </p>
+        </div>
+      </div>
+    </main>
   );
 }
