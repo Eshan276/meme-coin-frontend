@@ -1,16 +1,52 @@
 "use client";
 
-
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useState, useEffect } from "react";
 import * as anchor from "@coral-xyz/anchor";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import WalletButton from "@/components/WalletButton";
-import idl from "@/idl/meme_coin_program.json";
 
-const PROGRAM_ID = new PublicKey(
-  "5ZCsDZAV9oH7Souj6UWtX3Q94ZrmPkVF5MVQuzmDd66X"
-);
+// Import your IDL
+import idlJson from "@/idl/meme_coin_program.json";
+
+// Make sure PROGRAM_ID is properly constructed
+const PROGRAM_ID_STRING = "5ZCsDZAV9oH7Souj6UWtX3Q94ZrmPkVF5MVQuzmDd66X";
+let PROGRAM_ID: PublicKey;
+
+try {
+  PROGRAM_ID = new PublicKey(PROGRAM_ID_STRING);
+  console.log("PROGRAM_ID created successfully:", PROGRAM_ID.toString());
+} catch (error) {
+  console.error("Error creating PROGRAM_ID:", error);
+  throw error;
+}
+
+// Fix the IDL by adding missing fields and proper types
+const idl = {
+  ...idlJson,
+  address: PROGRAM_ID_STRING,
+  types: [
+    {
+      name: "MemeCoin",
+      type: {
+        kind: "struct",
+        fields: [
+          { name: "creator", type: "publicKey" },
+          { name: "mint", type: "publicKey" },
+          { name: "name", type: "string" },
+          { name: "symbol", type: "string" },
+          { name: "uri", type: "string" },
+          { name: "decimals", type: "u8" },
+          { name: "totalSupply", type: "u64" },
+          { name: "pricePerToken", type: "u64" },
+          { name: "isActive", type: "bool" },
+          { name: "totalVolume", type: "u64" },
+          { name: "holdersCount", type: "u32" },
+        ],
+      },
+    },
+  ],
+};
 
 export default function Home() {
   const { connection } = useConnection();
@@ -18,6 +54,7 @@ export default function Home() {
 
   const [mounted, setMounted] = useState(false);
 
+  // Form states
   const [createForm, setCreateForm] = useState({
     name: "",
     symbol: "",
@@ -27,6 +64,11 @@ export default function Home() {
     pricePerToken: 1000000, // 0.001 SOL in lamports
   });
 
+  const [buyForm, setBuyForm] = useState({
+    coinName: "",
+    amount: 1,
+  });
+
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
 
@@ -34,45 +76,36 @@ export default function Home() {
     setMounted(true);
   }, []);
 
-const getProgram = () => {
-  if (
-    !wallet.publicKey ||
-    !wallet.signTransaction ||
-    !wallet.signAllTransactions
-  ) {
-    console.error("Wallet not fully connected");
-    return null;
-  }
+  // Get Anchor program instance
+  const getProgram = () => {
+    if (!wallet.wallet?.adapter) {
+      console.error("Wallet adapter is not initialized");
+      return null;
+    }
 
-  const provider = new anchor.AnchorProvider(
-    connection,
-    {
-      publicKey: wallet.publicKey,
-      signAllTransactions: wallet.signAllTransactions,
-      signTransaction: wallet.signTransaction,
-    } as anchor.Wallet,
-    anchor.AnchorProvider.defaultOptions()
-  );
-  console.log("Provider:", provider);
-  
-  return new anchor.Program(idl as anchor.Idl, PROGRAM_ID, provider);
-};
+    const provider = new anchor.AnchorProvider(
+      connection,
+      wallet as any,
+      anchor.AnchorProvider.defaultOptions()
+    );
 
+    console.log("Provider:", provider);
+    console.log("IDL JSON:", idlJson);
+    console.log("PROGRAM_ID:", PROGRAM_ID.toString());
 
+    try {
+      const program = new anchor.Program(idlJson as any, PROGRAM_ID, provider);
+      console.log("Program initialized successfully:", program);
+      return program;
+    } catch (error) {
+      console.error("Error initializing program:", error);
+      return null;
+    }
+  };
+  // Create a new meme coin
   const createMemeCoin = async () => {
     if (!wallet.publicKey) {
       setStatus("Please connect your wallet first");
-      return;
-    }
-
-    if (
-      !createForm.name ||
-      !createForm.symbol ||
-      !createForm.uri ||
-      isNaN(createForm.initialSupply) ||
-      isNaN(createForm.pricePerToken)
-    ) {
-      setStatus("Please fill out all fields with valid values.");
       return;
     }
 
@@ -83,36 +116,54 @@ const getProgram = () => {
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
+      // Generate mint keypair
       const mint = anchor.web3.Keypair.generate();
 
+      // Find PDA for meme coin account
       const [memeCoinPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("meme_coin"), Buffer.from(createForm.name)],
         PROGRAM_ID
       );
 
-      const tx = await program.methods
-        .createMemeCoin(
-          createForm.name,
-          createForm.symbol,
-          createForm.uri,
-          createForm.decimals,
-          new anchor.BN(Number(createForm.initialSupply)),
-          new anchor.BN(Number(createForm.pricePerToken))
-        )
-        .accounts({
-          memeCoin: memeCoinPda,
-          mint: mint.publicKey,
-          creator: wallet.publicKey,
-          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-        })
-        .signers([mint])
-        .rpc();
+      let tx: string | undefined;
 
-      setStatus(`✅ Meme coin created! TX: ${tx}`);
+      try {
+        tx = await program.methods
+          .createMemeCoin(
+            createForm.name,
+            createForm.symbol,
+            createForm.uri,
+            createForm.decimals,
+            new anchor.BN(createForm.initialSupply),
+            new anchor.BN(createForm.pricePerToken)
+          )
+          .accounts({
+            memeCoin: memeCoinPda,
+            mint: mint.publicKey,
+            creator: wallet.publicKey,
+            tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          })
+          .signers([mint])
+          .rpc();
+
+        console.log("Transaction successful:", tx);
+      } catch (error) {
+        console.error("Transaction failed:", error);
+        if (error instanceof Error && 'logs' in error) {
+          console.error("Transaction logs:", (error as any).logs);
+        }
+      }
+
+      if (tx) {
+        setStatus(`Meme coin created! TX: ${tx}`);
+      } else {
+        setStatus("Meme coin creation failed.");
+      }
       console.log("Transaction:", tx);
 
+      // Reset form
       setCreateForm({
         name: "",
         symbol: "",
@@ -121,9 +172,9 @@ const getProgram = () => {
         initialSupply: 1000000,
         pricePerToken: 1000000,
       });
-    } catch (error: any) {
+    } catch (error) {
       console.error("Error creating meme coin:", error);
-      setStatus(`❌ Error: ${error.message || error}`);
+      setStatus(`Error: ${error}`);
     } finally {
       setLoading(false);
     }
@@ -145,6 +196,7 @@ const getProgram = () => {
   return (
     <main className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-8">
       <div className="max-w-6xl mx-auto">
+        {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-5xl font-bold text-white mb-4">
             🚀 Meme Coin Factory
@@ -155,12 +207,14 @@ const getProgram = () => {
           <WalletButton />
         </div>
 
+        {/* Status */}
         {status && (
           <div className="bg-blue-800/50 border border-blue-400 rounded-lg p-4 mb-8 text-center">
             <p className="text-white">{status}</p>
           </div>
         )}
 
+        {/* Create Meme Coin */}
         <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
           <h2 className="text-3xl font-bold text-white mb-6">
             Create New Meme Coin
@@ -177,7 +231,8 @@ const getProgram = () => {
                 onChange={(e) =>
                   setCreateForm({ ...createForm, name: e.target.value })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white"
+                placeholder="Doge to the Moon"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
 
@@ -191,7 +246,8 @@ const getProgram = () => {
                 onChange={(e) =>
                   setCreateForm({ ...createForm, symbol: e.target.value })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white"
+                placeholder="MOON"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
 
@@ -205,7 +261,8 @@ const getProgram = () => {
                 onChange={(e) =>
                   setCreateForm({ ...createForm, uri: e.target.value })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white"
+                placeholder="https://example.com/metadata.json"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
 
@@ -222,14 +279,14 @@ const getProgram = () => {
                     initialSupply: parseInt(e.target.value),
                   })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
 
             <div className="md:col-span-2">
               <label className="block text-white font-medium mb-2">
-                Price per Token (lamports) -{" "}
-                {(createForm.pricePerToken / LAMPORTS_PER_SOL).toFixed(6)} SOL
+                Price per Token (lamports) - Current:{" "}
+                {createForm.pricePerToken / LAMPORTS_PER_SOL} SOL
               </label>
               <input
                 type="number"
@@ -240,7 +297,7 @@ const getProgram = () => {
                     pricePerToken: parseInt(e.target.value),
                   })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
           </div>
@@ -254,6 +311,7 @@ const getProgram = () => {
           </button>
         </div>
 
+        {/* Network Info */}
         <div className="bg-yellow-500/20 border border-yellow-400 rounded-lg p-4 text-center">
           <p className="text-yellow-200">
             🔧 <strong>Development Mode:</strong> Connected to Solana Devnet
