@@ -3,7 +3,12 @@
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useState, useEffect } from "react";
 import * as anchor from "@coral-xyz/anchor";
-import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+  PublicKey,
+  LAMPORTS_PER_SOL,
+  ComputeBudgetProgram,
+  Transaction,
+} from "@solana/web3.js";
 import WalletButton from "@/components/WalletButton";
 
 // Import your IDL
@@ -339,7 +344,62 @@ export default function Home() {
     }
   };
 
-  const buyMemeCoin = async (coinName: string, amount: number) => {
+  const ensureAssociatedTokenAccount = async (
+    mint: PublicKey,
+    owner: PublicKey
+  ) => {
+    const {
+      getAssociatedTokenAddress,
+      createAssociatedTokenAccountInstruction,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    } = await import("@solana/spl-token");
+    const ata = await getAssociatedTokenAddress(mint, owner);
+    const ataInfo = await connection.getAccountInfo(ata);
+
+    if (!ataInfo) {
+      console.log("Creating associated token account for:", ata.toString());
+      const transaction = new Transaction().add(
+        createAssociatedTokenAccountInstruction(
+          owner, // payer
+          ata, // associated token account
+          owner, // owner
+          mint, // mint
+          TOKEN_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        )
+      );
+
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = owner;
+
+      const signedTx = await wallet.signTransaction!(transaction);
+      const tx = await connection.sendRawTransaction(signedTx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+
+      await connection.confirmTransaction(
+        {
+          signature: tx,
+          blockhash: blockhash,
+          lastValidBlockHeight: (
+            await connection.getLatestBlockhash()
+          ).lastValidBlockHeight,
+        },
+        "confirmed"
+      );
+
+      console.log("Associated token account created:", tx);
+    } else {
+      console.log("Associated token account already exists:", ata.toString());
+    }
+
+    return ata;
+  };
+
+  const buyMemeCoin = async (coinName, amount) => {
     if (!wallet.publicKey) {
       setStatus("Please connect your wallet first");
       return;
@@ -357,11 +417,21 @@ export default function Home() {
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
+      // Use the exact name from creation
+      const formattedCoinName = coinName.trim();
+
+      console.log("=== PDA Derivation Debug ===");
+      console.log("Coin name for PDA:", formattedCoinName);
+      console.log("Coin name bytes:", Buffer.from(formattedCoinName));
+
       const [memeCoinPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("meme_coin"), Buffer.from(coinName)],
+        [Buffer.from("meme_coin"), Buffer.from(formattedCoinName)],
         PROGRAM_ID
       );
 
+      console.log("Derived PDA:", memeCoinPda.toString());
+
+      // Fetch meme coin account
       const memeCoinAccount = await program.account.memeCoin.fetch(memeCoinPda);
       if (!memeCoinAccount.isActive) throw new Error("Coin is not active");
 
@@ -369,35 +439,58 @@ export default function Home() {
       const pricePerToken = Number(memeCoinAccount.pricePerToken);
       const totalCost = (amount * pricePerToken) / LAMPORTS_PER_SOL;
 
+      // Check SOL balance
       const balance = await connection.getBalance(wallet.publicKey);
-      if (balance < totalCost * LAMPORTS_PER_SOL) {
+      if (balance < totalCost * LAMPORTS_PER_SOL + 0.01 * LAMPORTS_PER_SOL) {
         throw new Error(
-          `Insufficient SOL balance. Need at least ${totalCost.toFixed(4)} SOL.`
+          `Insufficient SOL balance. Need at least ${(totalCost + 0.01).toFixed(
+            4
+          )} SOL for purchase and fees.`
         );
       }
 
-      const {
-        getAssociatedTokenAddress,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID,
-      } = await import("@solana/spl-token");
-
-      const buyerTokenAccount = await getAssociatedTokenAddress(
+      // Ensure associated token account exists
+      const buyerTokenAccount = await ensureAssociatedTokenAccount(
         mint,
         wallet.publicKey
       );
 
+      // Log all accounts for debugging
       console.log("=== Buying Meme Coin ===");
-      console.log(
-        "Coin:",
-        coinName,
-        "Amount:",
-        amount,
-        "PDA:",
-        memeCoinPda.toString()
+      console.log("Coin:", formattedCoinName);
+      console.log("Amount:", amount);
+      console.log("Meme Coin PDA:", memeCoinPda.toString());
+      console.log("Mint:", mint.toString());
+      console.log("Buyer:", wallet.publicKey.toString());
+      console.log("Creator:", memeCoinAccount.creator.toString());
+      console.log("Buyer Token Account:", buyerTokenAccount.toString());
+      console.log("Total Cost:", totalCost, "SOL");
+
+      // Build transaction manually
+      const transaction = new Transaction();
+
+      // Add compute budget
+      transaction.add(
+        ComputeBudgetProgram.setComputeUnitLimit({
+          units: 2000000,
+        })
       );
 
-      const tx = await program.methods
+      console.log("=== Building Buy Instruction ===");
+      console.log({
+        memeCoin: memeCoinPda.toString(),
+        mint: mint.toString(),
+        buyer: wallet.publicKey.toString(),
+        creator: memeCoinAccount.creator.toString(),
+        buyerTokenAccount: buyerTokenAccount.toString(),
+        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID.toString(),
+        // associatedTokenProgram:
+        //   anchor.utils.token.ASSOCIATED_TOKEN_PROGRAM_ID.toString(),
+        systemProgram: anchor.web3.SystemProgram.programId.toString(),
+      });
+
+      // Build buy instruction
+      const buyInstruction = await program.methods
         .buyMemeCoin(new anchor.BN(amount))
         .accounts({
           memeCoin: memeCoinPda,
@@ -405,11 +498,44 @@ export default function Home() {
           buyer: wallet.publicKey,
           creator: memeCoinAccount.creator,
           buyerTokenAccount: buyerTokenAccount,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
+          associatedTokenProgram:
+            anchor.utils.token.ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
-        .rpc({ skipPreflight: false, commitment: "confirmed" });
+        .instruction();
+
+      transaction.add(buyInstruction);
+
+      // Set recent blockhash
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = wallet.publicKey;
+
+      // Sign and send transaction
+      const signedTx = await wallet.signTransaction!(transaction);
+      const tx = await connection.sendRawTransaction(signedTx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+
+      console.log("Transaction sent:", tx);
+      const confirmation = await connection.confirmTransaction(
+        {
+          signature: tx,
+          blockhash: blockhash,
+          lastValidBlockHeight: (
+            await connection.getLatestBlockhash()
+          ).lastValidBlockHeight,
+        },
+        "confirmed"
+      );
+
+      if (confirmation.value.err) {
+        throw new Error(
+          `Transaction failed: ${JSON.stringify(confirmation.value.err)}`
+        );
+      }
 
       console.log("Buy transaction confirmed:", tx);
       setStatus(
@@ -418,18 +544,21 @@ export default function Home() {
       setBuyForm({ coinName: "", amount: 1 });
       await loadUserData();
     } catch (error) {
-      console.error("Error buying meme coin:", error);
-      setStatus(
-        `❌ Error buying ${coinName}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+      console.error("Transaction error:", error);
+      let errorMessage = `❌ Error buying ${coinName}: ${
+        error.message || String(error)
+      }`;
+      if (error.logs) {
+        console.error("Transaction logs:", error.logs);
+        errorMessage += ` | Logs: ${JSON.stringify(error.logs)}`;
+      }
+      setStatus(errorMessage);
     } finally {
       setLoading(false);
     }
   };
 
-  const sellMemeCoin = async (coinName: string, amount: number) => {
+  const sellMemeCoin = async (coinName, amount) => {
     if (!wallet.publicKey) {
       setStatus("Please connect your wallet first");
       return;
@@ -447,8 +576,11 @@ export default function Home() {
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
+      // Use the exact name from creation
+      const formattedCoinName = coinName.trim();
+
       const [memeCoinPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("meme_coin"), Buffer.from(coinName)],
+        [Buffer.from("meme_coin"), Buffer.from(formattedCoinName)],
         PROGRAM_ID
       );
 
@@ -474,7 +606,7 @@ export default function Home() {
       console.log("=== Selling Meme Coin ===");
       console.log(
         "Coin:",
-        coinName,
+        formattedCoinName,
         "Amount:",
         amount,
         "PDA:",
@@ -571,7 +703,7 @@ export default function Home() {
                   setCreateForm({ ...createForm, name: e.target.value })
                 }
                 placeholder="Doge to the Moon"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
             <div>
@@ -585,7 +717,7 @@ export default function Home() {
                   setCreateForm({ ...createForm, symbol: e.target.value })
                 }
                 placeholder="MOON"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
             <div>
@@ -599,7 +731,7 @@ export default function Home() {
                   setCreateForm({ ...createForm, uri: e.target.value })
                 }
                 placeholder="https://example.com/metadata.json"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
             <div>
@@ -615,13 +747,14 @@ export default function Home() {
                     initialSupply: parseInt(e.target.value),
                   })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                min="1"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
             <div className="md:col-span-2">
               <label className="block text-white font-medium mb-2">
                 Price per Token (lamports) - Current:{" "}
-                {createForm.pricePerToken / LAMPORTS_PER_SOL} SOL
+                {(createForm.pricePerToken / LAMPORTS_PER_SOL).toFixed(6)} SOL
               </label>
               <input
                 type="number"
@@ -632,14 +765,15 @@ export default function Home() {
                     pricePerToken: parseInt(e.target.value),
                   })
                 }
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-purple-400 focus:outline-none"
+                min="1"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
               />
             </div>
           </div>
           <button
             onClick={createMemeCoin}
             disabled={loading || !wallet.connected}
-            className="mt-6 w-full bg-gradient-to-r from-green-500 to-blue-500 hover:from-green-600 hover:to-blue-600 disabled:from-gray-500 disabled:to-gray-600 text-white font-bold py-4 px-8 rounded-lg transition-all"
+            className="mt-6 w-full bg-gradient-to-r from-green-500 to-blue-600 hover:from-green-600 hover:to-blue-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
           >
             {loading ? "Creating..." : "Create Meme Coin 🚀"}
           </button>
@@ -659,7 +793,7 @@ export default function Home() {
                   setBuyForm({ ...buyForm, coinName: e.target.value })
                 }
                 placeholder="Enter coin name"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-green-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-green-600 focus:outline-none"
               />
             </div>
             <div>
@@ -673,14 +807,14 @@ export default function Home() {
                   setBuyForm({ ...buyForm, amount: parseInt(e.target.value) })
                 }
                 min="1"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-green-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-green-600 focus:outline-none"
               />
             </div>
           </div>
           <button
             onClick={() => buyMemeCoin(buyForm.coinName, buyForm.amount)}
             disabled={loading || !wallet.connected}
-            className="mt-6 w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:from-gray-500 disabled:to-gray-600 text-white font-bold py-4 px-8 rounded-lg transition-all"
+            className="mt-6 w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
           >
             {loading ? "Buying..." : "Buy Tokens 💰"}
           </button>
@@ -700,7 +834,7 @@ export default function Home() {
                   setSellForm({ ...sellForm, coinName: e.target.value })
                 }
                 placeholder="Enter coin name"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-red-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-red-600 focus:outline-none"
               />
             </div>
             <div>
@@ -714,14 +848,14 @@ export default function Home() {
                   setSellForm({ ...sellForm, amount: parseInt(e.target.value) })
                 }
                 min="1"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-300 border border-white/30 focus:border-red-400 focus:outline-none"
+                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-red-600 focus:outline-none"
               />
             </div>
           </div>
           <button
             onClick={() => sellMemeCoin(sellForm.coinName, sellForm.amount)}
             disabled={loading || !wallet.connected}
-            className="mt-6 w-full bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 disabled:from-gray-500 disabled:to-gray-600 text-white font-bold py-4 px-8 rounded-lg transition-all"
+            className="mt-6 w-full bg-gradient-to-r from-red-500 to-pink-600 hover:from-red-600 hover:to-pink-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
           >
             {loading ? "Selling..." : "Sell Tokens 💸"}
           </button>
@@ -736,20 +870,20 @@ export default function Home() {
               {userTokens.map((token, index) => (
                 <div
                   key={index}
-                  className="bg-white/5 rounded-lg p-4 border border-white/10"
+                  className="bg-white/5 rounded-lg p-4 border border-white/20"
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-lg font-bold text-white">
+                    <h3 className="text-lg font-semibold text-white">
                       {token.name}
                     </h3>
-                    <span className="text-sm bg-blue-500 text-white px-2 py-1 rounded">
+                    <span className="text-sm bg-blue-600 text-white px-3 py-1 rounded">
                       {token.symbol}
                     </span>
                   </div>
                   <div className="space-y-1 text-gray-300">
                     <p>
                       Balance:{" "}
-                      <span className="text-green-400 font-medium">
+                      <span className="text-green-500 font-medium">
                         {token.balance}
                       </span>
                     </p>
@@ -771,18 +905,23 @@ export default function Home() {
                       </span>
                     </p>
                   </div>
-                  <div className="mt-3 flex gap-2">
+                  <div className="mt-4 flex gap-2">
                     <button
-                      onClick={() => buyMemeCoin(token.name, 1)}
-                      className="flex-1 bg-green-600 hover:bg-green-700 text-white text-xs py-1 px-2 rounded"
+                      onClick={() => buyMemeCoin(token.name.trim(), 1)}
+                      disabled={loading || !wallet.connected}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
                     >
                       Buy More
                     </button>
                     <button
                       onClick={() =>
-                        sellMemeCoin(token.name, Math.min(10, token.balance))
+                        sellMemeCoin(
+                          token.name.trim(),
+                          Math.min(10, token.balance)
+                        )
                       }
-                      className="flex-1 bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-2 rounded"
+                      disabled={loading || !wallet.connected}
+                      className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
                     >
                       Sell
                     </button>
@@ -800,34 +939,36 @@ export default function Home() {
             </h2>
             <button
               onClick={loadAvailableCoins}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+              disabled={loading}
+              className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors disabled:bg-gray-400"
             >
               🔄 Refresh
             </button>
           </div>
           <div className="mb-4 text-sm text-gray-400">
             Debug: Coins loaded: {coins.length} | Wallet connected:{" "}
-            {wallet.connected ? "✅" : "❌"} | Mounted: {mounted ? "✅" : "❌"}
+            {wallet.connected ? "Connected ✅" : "Disconnected ❌"} | Mounted:{" "}
+            {mounted ? "Yes ✅" : "No ❌"}
           </div>
           {coins.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {coins.map((coin, index) => (
                 <div
                   key={index}
-                  className="bg-white/5 rounded-lg p-4 border border-white/10 hover:border-white/20 transition-all"
+                  className="bg-white/5 rounded-lg p-4 border border-white/20 hover:border-white/30 transition-all"
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-lg font-bold text-white">
+                    <h3 className="text-lg font-semibold text-white">
                       {coin.name}
                     </h3>
-                    <span className="text-sm bg-purple-500 text-white px-2 py-1 rounded">
+                    <span className="text-sm bg-purple-600 text-white px-2 py-1 rounded">
                       {coin.symbol}
                     </span>
                   </div>
                   <div className="space-y-1 text-gray-300 text-sm">
                     <p>
                       Creator:{" "}
-                      <span className="text-blue-400 font-mono text-xs">
+                      <span className="text-blue-400 font-mono">
                         {coin.creator.toString().slice(0, 8)}...
                       </span>
                     </p>
@@ -860,15 +1001,15 @@ export default function Home() {
                         coin.isActive ? "text-green-400" : "text-red-400"
                       }`}
                     >
-                      {coin.isActive ? "🟢 Active" : "🔴 Inactive"}
+                      {coin.isActive ? "Active 🟢" : "Inactive 🔴"}
                     </p>
                   </div>
                   {coin.isActive && (
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-4 flex gap-2">
                       <button
-                        onClick={() => buyMemeCoin(coin.name, 1)}
+                        onClick={() => buyMemeCoin(coin.name.trim(), 1)}
                         disabled={loading || !wallet.connected}
-                        className="flex-1 bg-green-600 hover:bg-green-700 text-white text-xs py-2 px-3 rounded transition-colors disabled:opacity-50"
+                        className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
                       >
                         Quick Buy
                       </button>
@@ -879,7 +1020,7 @@ export default function Home() {
                           );
                           if (userToken) {
                             sellMemeCoin(
-                              coin.name,
+                              coin.name.trim(),
                               Math.min(10, userToken.balance)
                             );
                           }
@@ -889,7 +1030,7 @@ export default function Home() {
                           !wallet.connected ||
                           !userTokens.find((t) => t.name === coin.name)
                         }
-                        className="flex-1 bg-red-600 hover:bg-red-700 text-white text-xs py-2 px-3 rounded transition-colors disabled:opacity-50"
+                        className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
                       >
                         Quick Sell
                       </button>
@@ -902,8 +1043,8 @@ export default function Home() {
             <div className="text-center text-gray-400 py-8">
               <p className="text-lg mb-2">No meme coins found yet</p>
               <p className="text-sm">
-                Create the first one above, or click refresh to check for
-                existing coins! 🚀
+                Create one above, or click refresh to check for existing coins!
+                🚀
               </p>
               <p className="text-xs mt-2 text-gray-500">
                 Debug: Coins array length: {coins.length}
@@ -912,7 +1053,7 @@ export default function Home() {
           )}
         </div>
 
-        <div className="bg-yellow-500/20 border border-yellow-400 rounded-lg p-4 text-center">
+        <div className="bg-yellow-200/20 border border-yellow-400 rounded-lg p-4 text-center">
           <p className="text-yellow-200">
             🔧 <strong>Development Mode:</strong> Connected to Solana Devnet
           </p>
