@@ -1,7 +1,7 @@
 "use client";
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import * as anchor from "@coral-xyz/anchor";
 import {
   PublicKey,
@@ -10,6 +10,16 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import WalletButton from "@/components/WalletButton";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  ResponsiveContainer,
+  Tooltip,
+  AreaChart,
+  Area,
+} from "recharts";
 
 // Import your IDL
 import idlJson from "@/idl/meme_coin_program.json";
@@ -36,18 +46,31 @@ const idl = {
   },
 };
 
+// Mock chart data
+const generateChartData = (coin) => {
+  const basePrice = coin?.priceInSOL || 0.001;
+  return Array.from({ length: 24 }, (_, i) => ({
+    time: i,
+    price: basePrice * (1 + (Math.random() - 0.5) * 0.1),
+    volume: Math.random() * 1000,
+  }));
+};
+
 export default function Home() {
   const { connection } = useConnection();
   const wallet = useWallet();
+  const chartRef = useRef(null);
 
   const [mounted, setMounted] = useState(false);
+  const [activeTab, setActiveTab] = useState("trade");
+  const [selectedCoin, setSelectedCoin] = useState(null);
   const [createForm, setCreateForm] = useState({
     name: "",
     symbol: "",
     uri: "",
     decimals: 9,
     initialSupply: 1000000,
-    pricePerToken: 1000000, // 0.001 SOL in lamports
+    pricePerToken: 1000000,
   });
   const [buyForm, setBuyForm] = useState({ coinName: "", amount: 1 });
   const [sellForm, setSellForm] = useState({ coinName: "", amount: 1 });
@@ -103,8 +126,8 @@ export default function Home() {
       }
 
       console.log("Fetching all meme coin accounts...");
-      const memeCoinAccounts = await program.account.memeCoin.all();
-      console.log("Found meme coin accounts:", memeCoinAccounts.length);
+      const memeCoinAccounts: { publicKey: PublicKey; account: any }[] =
+        await program.account.memeCoin.all();
 
       const coinsData = memeCoinAccounts.map((account) => {
         console.log(
@@ -112,15 +135,20 @@ export default function Home() {
           account.publicKey.toString(),
           account.account
         );
+
         return {
           address: account.publicKey,
-          ...account.account,
+          ...(account.account as Record<string, unknown>),
           priceInSOL: account.account.pricePerToken / LAMPORTS_PER_SOL,
+          chartData: generateChartData(account.account),
         };
       });
 
       console.log("Processed coins data:", coinsData);
       setCoins(coinsData);
+      if (coinsData.length > 0 && !selectedCoin) {
+        setSelectedCoin(coinsData[0]);
+      }
     } catch (error) {
       console.error("Error loading meme coins:", error);
       setStatus(
@@ -195,20 +223,8 @@ export default function Home() {
       anchor.AnchorProvider.defaultOptions()
     );
 
-    console.log("=== Program ID Debug ===");
-    console.log("PROGRAM_ID we're using:", PROGRAM_ID.toString());
-    console.log("IDL original metadata:", (idlJson as any).metadata);
-    console.log("IDL corrected metadata:", idl.metadata);
-    console.log("========================");
-
     try {
       const program = new anchor.Program(idl as any, PROGRAM_ID, provider);
-      console.log("Program initialized successfully");
-      console.log(
-        "Program ID from program object:",
-        program.programId.toString()
-      );
-      console.log("Are they equal?", program.programId.equals(PROGRAM_ID));
       return program;
     } catch (error) {
       console.error("Error initializing program:", error);
@@ -231,26 +247,16 @@ export default function Home() {
     setStatus("Creating meme coin...");
 
     try {
-      console.log("=== Starting Meme Coin Creation ===");
-      console.log("Form data:", createForm);
-      console.log("Wallet public key:", wallet.publicKey.toString());
-      console.log("Connection endpoint:", connection.rpcEndpoint);
-
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
       const mint = anchor.web3.Keypair.generate();
-      console.log("Generated mint:", mint.publicKey.toString());
-
       const [memeCoinPda, bump] = PublicKey.findProgramAddressSync(
         [Buffer.from("meme_coin"), Buffer.from(createForm.name)],
         PROGRAM_ID
       );
-      console.log("PDA found:", memeCoinPda.toString(), "bump:", bump);
 
       const balance = await connection.getBalance(wallet.publicKey);
-      console.log("Wallet balance:", balance / LAMPORTS_PER_SOL, "SOL");
-
       if (balance < 0.1 * LAMPORTS_PER_SOL) {
         throw new Error(
           "Insufficient SOL balance. Need at least 0.1 SOL for transaction fees."
@@ -258,7 +264,6 @@ export default function Home() {
       }
 
       const { blockhash } = await connection.getLatestBlockhash("confirmed");
-      console.log("Got blockhash:", blockhash);
 
       const accounts = {
         memeCoin: memeCoinPda,
@@ -268,9 +273,6 @@ export default function Home() {
         systemProgram: anchor.web3.SystemProgram.programId,
         rent: anchor.web3.SYSVAR_RENT_PUBKEY,
       };
-
-      console.log("Accounts:", accounts);
-      console.log("Signers:", [mint.publicKey.toString()]);
 
       const instruction = await program.methods
         .createMemeCoin(
@@ -285,23 +287,18 @@ export default function Home() {
         .signers([mint])
         .instruction();
 
-      console.log("Instruction built successfully");
-
       const transaction = new anchor.web3.Transaction().add(instruction);
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = wallet.publicKey;
 
-      console.log("Signing transaction...");
       transaction.partialSign(mint);
       const signedTx = await wallet.signTransaction!(transaction);
 
-      console.log("Sending transaction...");
       const tx = await connection.sendRawTransaction(signedTx.serialize(), {
         skipPreflight: false,
         preflightCommitment: "confirmed",
       });
 
-      console.log("Transaction sent:", tx);
       const confirmation = await connection.confirmTransaction(
         {
           signature: tx,
@@ -319,10 +316,7 @@ export default function Home() {
         );
       }
 
-      console.log("Transaction confirmed:", tx);
       setStatus(`✅ Meme coin created successfully! TX: ${tx}`);
-      console.log("Success! Transaction:", tx);
-
       setCreateForm({
         name: "",
         symbol: "",
@@ -340,7 +334,6 @@ export default function Home() {
       );
     } finally {
       setLoading(false);
-      console.log("=== Meme Coin Creation Complete ===");
     }
   };
 
@@ -358,13 +351,12 @@ export default function Home() {
     const ataInfo = await connection.getAccountInfo(ata);
 
     if (!ataInfo) {
-      console.log("Creating associated token account for:", ata.toString());
       const transaction = new Transaction().add(
         createAssociatedTokenAccountInstruction(
-          owner, // payer
-          ata, // associated token account
-          owner, // owner
-          mint, // mint
+          owner,
+          ata,
+          owner,
+          mint,
           TOKEN_PROGRAM_ID,
           ASSOCIATED_TOKEN_PROGRAM_ID
         )
@@ -390,10 +382,6 @@ export default function Home() {
         },
         "confirmed"
       );
-
-      console.log("Associated token account created:", tx);
-    } else {
-      console.log("Associated token account already exists:", ata.toString());
     }
 
     return ata;
@@ -417,21 +405,12 @@ export default function Home() {
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
-      // Use the exact name from creation
       const formattedCoinName = coinName.trim();
-
-      console.log("=== PDA Derivation Debug ===");
-      console.log("Coin name for PDA:", formattedCoinName);
-      console.log("Coin name bytes:", Buffer.from(formattedCoinName));
-
       const [memeCoinPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("meme_coin"), Buffer.from(formattedCoinName)],
         PROGRAM_ID
       );
 
-      console.log("Derived PDA:", memeCoinPda.toString());
-
-      // Fetch meme coin account
       const memeCoinAccount = await program.account.memeCoin.fetch(memeCoinPda);
       if (!memeCoinAccount.isActive) throw new Error("Coin is not active");
 
@@ -439,7 +418,6 @@ export default function Home() {
       const pricePerToken = Number(memeCoinAccount.pricePerToken);
       const totalCost = (amount * pricePerToken) / LAMPORTS_PER_SOL;
 
-      // Check SOL balance
       const balance = await connection.getBalance(wallet.publicKey);
       if (balance < totalCost * LAMPORTS_PER_SOL + 0.01 * LAMPORTS_PER_SOL) {
         throw new Error(
@@ -449,47 +427,20 @@ export default function Home() {
         );
       }
 
-      // Ensure associated token account exists
       const buyerTokenAccount = await ensureAssociatedTokenAccount(
         mint,
         wallet.publicKey
       );
 
-      // Log all accounts for debugging
-      console.log("=== Buying Meme Coin ===");
-      console.log("Coin:", formattedCoinName);
-      console.log("Amount:", amount);
-      console.log("Meme Coin PDA:", memeCoinPda.toString());
-      console.log("Mint:", mint.toString());
-      console.log("Buyer:", wallet.publicKey.toString());
-      console.log("Creator:", memeCoinAccount.creator.toString());
-      console.log("Buyer Token Account:", buyerTokenAccount.toString());
-      console.log("Total Cost:", totalCost, "SOL");
-
-      // Build transaction manually
       const transaction = new Transaction();
-
-      // Add compute budget
       transaction.add(
         ComputeBudgetProgram.setComputeUnitLimit({
           units: 2000000,
         })
       );
 
-      console.log("=== Building Buy Instruction ===");
-      console.log({
-        memeCoin: memeCoinPda.toString(),
-        mint: mint.toString(),
-        buyer: wallet.publicKey.toString(),
-        creator: memeCoinAccount.creator.toString(),
-        buyerTokenAccount: buyerTokenAccount.toString(),
-        tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID.toString(),
-        // associatedTokenProgram:
-        //   anchor.utils.token.ASSOCIATED_TOKEN_PROGRAM_ID.toString(),
-        systemProgram: anchor.web3.SystemProgram.programId.toString(),
-      });
+      const { ASSOCIATED_TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
 
-      // Build buy instruction
       const buyInstruction = await program.methods
         .buyMemeCoin(new anchor.BN(amount))
         .accounts({
@@ -499,27 +450,23 @@ export default function Home() {
           creator: memeCoinAccount.creator,
           buyerTokenAccount: buyerTokenAccount,
           tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-          associatedTokenProgram:
-            anchor.utils.token.ASSOCIATED_TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: anchor.web3.SystemProgram.programId,
         })
         .instruction();
 
       transaction.add(buyInstruction);
 
-      // Set recent blockhash
       const { blockhash } = await connection.getLatestBlockhash("confirmed");
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = wallet.publicKey;
 
-      // Sign and send transaction
       const signedTx = await wallet.signTransaction!(transaction);
       const tx = await connection.sendRawTransaction(signedTx.serialize(), {
         skipPreflight: false,
         preflightCommitment: "confirmed",
       });
 
-      console.log("Transaction sent:", tx);
       const confirmation = await connection.confirmTransaction(
         {
           signature: tx,
@@ -537,7 +484,6 @@ export default function Home() {
         );
       }
 
-      console.log("Buy transaction confirmed:", tx);
       setStatus(
         `✅ Successfully bought ${amount} ${coinName} tokens! TX: ${tx}`
       );
@@ -548,10 +494,6 @@ export default function Home() {
       let errorMessage = `❌ Error buying ${coinName}: ${
         error.message || String(error)
       }`;
-      if (error.logs) {
-        console.error("Transaction logs:", error.logs);
-        errorMessage += ` | Logs: ${JSON.stringify(error.logs)}`;
-      }
       setStatus(errorMessage);
     } finally {
       setLoading(false);
@@ -576,9 +518,7 @@ export default function Home() {
       const program = getProgram();
       if (!program) throw new Error("Program not initialized");
 
-      // Use the exact name from creation
       const formattedCoinName = coinName.trim();
-
       const [memeCoinPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("meme_coin"), Buffer.from(formattedCoinName)],
         PROGRAM_ID
@@ -588,7 +528,6 @@ export default function Home() {
       if (!memeCoinAccount.isActive) throw new Error("Coin is not active");
 
       const mint = memeCoinAccount.mint;
-
       const { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID } =
         await import("@solana/spl-token");
       const sellerTokenAccount = await getAssociatedTokenAddress(
@@ -603,16 +542,6 @@ export default function Home() {
         );
       }
 
-      console.log("=== Selling Meme Coin ===");
-      console.log(
-        "Coin:",
-        formattedCoinName,
-        "Amount:",
-        amount,
-        "PDA:",
-        memeCoinPda.toString()
-      );
-
       const tx = await program.methods
         .sellMemeCoin(new anchor.BN(amount))
         .accounts({
@@ -625,7 +554,6 @@ export default function Home() {
         })
         .rpc({ skipPreflight: false, commitment: "confirmed" });
 
-      console.log("Sell transaction confirmed:", tx);
       setStatus(`✅ Successfully sold ${amount} ${coinName} tokens! TX: ${tx}`);
       setSellForm({ coinName: "", amount: 1 });
       await loadUserData();
@@ -643,425 +571,639 @@ export default function Home() {
 
   if (!mounted) {
     return (
-      <main className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-8">
-        <div className="max-w-6xl mx-auto text-center">
-          <h1 className="text-5xl font-bold text-white mb-4">
-            🚀 Meme Coin Factory
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-cyan-400 mx-auto mb-4"></div>
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">
+            Quantum DEX
           </h1>
-          <p className="text-xl text-gray-300">Loading...</p>
+          <p className="text-gray-400 mt-2">
+            Initializing quantum protocols...
+          </p>
         </div>
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="text-center mb-12">
-          <h1 className="text-5xl font-bold text-white mb-4">
-            🚀 Meme Coin Factory
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 relative overflow-hidden">
+      {/* Animated Background */}
+      <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
+        <div className="absolute top-3/4 right-1/4 w-96 h-96 bg-cyan-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse delay-700"></div>
+        <div className="absolute top-1/2 left-1/2 w-96 h-96 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse delay-1000"></div>
+      </div>
+
+      {/* Main Content */}
+      <div className="relative z-10 max-w-7xl mx-auto px-4 py-6">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <h1 className="text-6xl font-black bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent mb-4 animate-pulse">
+            ⚡ QUANTUM DEX
           </h1>
-          <p className="text-xl text-gray-300 mb-8">
-            Create, buy, and sell meme coins on Solana Devnet
+          <p className="text-xl text-gray-300 mb-6">
+            Next-Generation Meme Coin Trading Protocol
           </p>
-          <WalletButton />
+          <div className="flex justify-center">
+            <WalletButton />
+          </div>
+
           {wallet.connected && (
-            <div className="mt-6 bg-white/10 backdrop-blur-md rounded-lg p-4 inline-block">
-              <p className="text-white font-medium">
-                💰 SOL Balance:{" "}
-                <span className="text-green-400">
-                  {solBalance.toFixed(4)} SOL
+            <div className="mt-6 inline-block bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4">
+              <div className="flex items-center space-x-4">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                <span className="text-gray-300">SOL Balance:</span>
+                <span className="text-2xl font-bold text-green-400">
+                  {solBalance.toFixed(4)}
                 </span>
-              </p>
-              <p className="text-gray-300 text-sm">
-                Wallet: {wallet.publicKey?.toString().slice(0, 8)}...
-                {wallet.publicKey?.toString().slice(-8)}
-              </p>
+                <span className="text-sm text-gray-400 font-mono">
+                  {wallet.publicKey?.toString().slice(0, 6)}...
+                  {wallet.publicKey?.toString().slice(-4)}
+                </span>
+              </div>
             </div>
           )}
         </div>
 
+        {/* Status Display */}
         {status && (
-          <div className="bg-blue-800/50 border border-blue-400 rounded-lg p-4 mb-8 text-center">
-            <p className="text-white">{status}</p>
+          <div className="mb-6 bg-gradient-to-r from-blue-500/10 to-purple-500/10 backdrop-blur-xl border border-blue-400/20 rounded-2xl p-4 text-center">
+            <p className="text-blue-200">{status}</p>
           </div>
         )}
 
-        <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
-          <h2 className="text-3xl font-bold text-white mb-6">
-            Create New Meme Coin
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Coin Name
-              </label>
-              <input
-                type="text"
-                value={createForm.name}
-                onChange={(e) =>
-                  setCreateForm({ ...createForm, name: e.target.value })
-                }
-                placeholder="Doge to the Moon"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Symbol
-              </label>
-              <input
-                type="text"
-                value={createForm.symbol}
-                onChange={(e) =>
-                  setCreateForm({ ...createForm, symbol: e.target.value })
-                }
-                placeholder="MOON"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Metadata URI
-              </label>
-              <input
-                type="text"
-                value={createForm.uri}
-                onChange={(e) =>
-                  setCreateForm({ ...createForm, uri: e.target.value })
-                }
-                placeholder="https://example.com/metadata.json"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Initial Supply
-              </label>
-              <input
-                type="number"
-                value={createForm.initialSupply}
-                onChange={(e) =>
-                  setCreateForm({
-                    ...createForm,
-                    initialSupply: parseInt(e.target.value),
-                  })
-                }
-                min="1"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-white font-medium mb-2">
-                Price per Token (lamports) - Current:{" "}
-                {(createForm.pricePerToken / LAMPORTS_PER_SOL).toFixed(6)} SOL
-              </label>
-              <input
-                type="number"
-                value={createForm.pricePerToken}
-                onChange={(e) =>
-                  setCreateForm({
-                    ...createForm,
-                    pricePerToken: parseInt(e.target.value),
-                  })
-                }
-                min="1"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-purple-400 focus:outline-none"
-              />
-            </div>
+        {/* Navigation Tabs */}
+        <div className="flex justify-center mb-8">
+          <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-2 flex space-x-2">
+            {["trade", "create", "portfolio"].map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-6 py-3 rounded-xl font-semibold transition-all duration-300 ${
+                  activeTab === tab
+                    ? "bg-gradient-to-r from-cyan-500 to-purple-500 text-white shadow-lg shadow-cyan-500/25"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </button>
+            ))}
           </div>
-          <button
-            onClick={createMemeCoin}
-            disabled={loading || !wallet.connected}
-            className="mt-6 w-full bg-gradient-to-r from-green-500 to-blue-600 hover:from-green-600 hover:to-blue-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-          >
-            {loading ? "Creating..." : "Create Meme Coin 🚀"}
-          </button>
         </div>
 
-        <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
-          <h2 className="text-3xl font-bold text-white mb-6">Buy Meme Coin</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Coin Name
-              </label>
-              <input
-                type="text"
-                value={buyForm.coinName}
-                onChange={(e) =>
-                  setBuyForm({ ...buyForm, coinName: e.target.value })
-                }
-                placeholder="Enter coin name"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-green-600 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Amount
-              </label>
-              <input
-                type="number"
-                value={buyForm.amount}
-                onChange={(e) =>
-                  setBuyForm({ ...buyForm, amount: parseInt(e.target.value) })
-                }
-                min="1"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-green-600 focus:outline-none"
-              />
-            </div>
-          </div>
-          <button
-            onClick={() => buyMemeCoin(buyForm.coinName, buyForm.amount)}
-            disabled={loading || !wallet.connected}
-            className="mt-6 w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-          >
-            {loading ? "Buying..." : "Buy Tokens 💰"}
-          </button>
-        </div>
-
-        <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
-          <h2 className="text-3xl font-bold text-white mb-6">Sell Meme Coin</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Coin Name
-              </label>
-              <input
-                type="text"
-                value={sellForm.coinName}
-                onChange={(e) =>
-                  setSellForm({ ...sellForm, coinName: e.target.value })
-                }
-                placeholder="Enter coin name"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-red-600 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-white font-medium mb-2">
-                Amount
-              </label>
-              <input
-                type="number"
-                value={sellForm.amount}
-                onChange={(e) =>
-                  setSellForm({ ...sellForm, amount: parseInt(e.target.value) })
-                }
-                min="1"
-                className="w-full p-3 rounded-lg bg-white/20 text-white placeholder-gray-400 border border-white/30 focus:border-red-600 focus:outline-none"
-              />
-            </div>
-          </div>
-          <button
-            onClick={() => sellMemeCoin(sellForm.coinName, sellForm.amount)}
-            disabled={loading || !wallet.connected}
-            className="mt-6 w-full bg-gradient-to-r from-red-500 to-pink-600 hover:from-red-600 hover:to-pink-700 disabled:bg-gray-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-          >
-            {loading ? "Selling..." : "Sell Tokens 💸"}
-          </button>
-        </div>
-
-        {wallet.connected && userTokens.length > 0 && (
-          <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
-            <h2 className="text-3xl font-bold text-white mb-6">
-              🎯 Your Portfolio
-            </h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {userTokens.map((token, index) => (
-                <div
-                  key={index}
-                  className="bg-white/5 rounded-lg p-4 border border-white/20"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-lg font-semibold text-white">
-                      {token.name}
-                    </h3>
-                    <span className="text-sm bg-blue-600 text-white px-3 py-1 rounded">
-                      {token.symbol}
-                    </span>
+        {/* Trading Interface */}
+        {activeTab === "trade" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Chart Section */}
+            <div className="lg:col-span-2 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-6">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-2xl font-bold text-white">
+                    {selectedCoin?.name || "Select a Coin"}
+                  </h3>
+                  <p className="text-gray-400">{selectedCoin?.symbol || ""}</p>
+                </div>
+                {selectedCoin && (
+                  <div className="text-right">
+                    <p className="text-3xl font-bold text-green-400">
+                      ${selectedCoin.priceInSOL?.toFixed(6)}
+                    </p>
+                    <p className="text-sm text-gray-400">+2.45% (24h)</p>
                   </div>
-                  <div className="space-y-1 text-gray-300">
-                    <p>
-                      Balance:{" "}
-                      <span className="text-green-500 font-medium">
-                        {token.balance}
-                      </span>
-                    </p>
-                    <p>
-                      Price:{" "}
-                      <span className="text-yellow-400">
-                        {(token.pricePerToken / LAMPORTS_PER_SOL).toFixed(6)}{" "}
-                        SOL
-                      </span>
-                    </p>
-                    <p>
-                      Value:{" "}
-                      <span className="text-purple-400">
-                        {(
-                          (token.balance * token.pricePerToken) /
-                          LAMPORTS_PER_SOL
-                        ).toFixed(6)}{" "}
-                        SOL
-                      </span>
+                )}
+              </div>
+
+              {/* Chart */}
+              <div className="h-80 mb-6">
+                {selectedCoin?.chartData ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={selectedCoin.chartData}>
+                      <defs>
+                        <linearGradient
+                          id="colorPrice"
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="5%"
+                            stopColor="#06b6d4"
+                            stopOpacity={0.3}
+                          />
+                          <stop
+                            offset="95%"
+                            stopColor="#06b6d4"
+                            stopOpacity={0}
+                          />
+                        </linearGradient>
+                      </defs>
+                      <XAxis
+                        dataKey="time"
+                        axisLine={false}
+                        tickLine={false}
+                        tick={{ fill: "#9ca3af", fontSize: 12 }}
+                      />
+                      <YAxis
+                        axisLine={false}
+                        tickLine={false}
+                        tick={{ fill: "#9ca3af", fontSize: 12 }}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "rgba(0, 0, 0, 0.8)",
+                          border: "none",
+                          borderRadius: "12px",
+                          color: "white",
+                        }}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="price"
+                        stroke="#06b6d4"
+                        strokeWidth={2}
+                        fillOpacity={1}
+                        fill="url(#colorPrice)"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-gray-500">
+                    <div className="text-center">
+                      <div className="w-16 h-16 border-4 border-gray-600 border-t-cyan-400 rounded-full animate-spin mx-auto mb-4"></div>
+                      <p>Select a coin to view chart</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Stats */}
+              {selectedCoin && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="bg-white/5 rounded-2xl p-4 text-center">
+                    <p className="text-gray-400 text-sm">Volume</p>
+                    <p className="text-white font-bold">
+                      {(selectedCoin.totalVolume / LAMPORTS_PER_SOL).toFixed(2)}{" "}
+                      SOL
                     </p>
                   </div>
-                  <div className="mt-4 flex gap-2">
-                    <button
-                      onClick={() => buyMemeCoin(token.name.trim(), 1)}
-                      disabled={loading || !wallet.connected}
-                      className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
-                    >
-                      Buy More
-                    </button>
-                    <button
-                      onClick={() =>
-                        sellMemeCoin(
-                          token.name.trim(),
-                          Math.min(10, token.balance)
-                        )
-                      }
-                      disabled={loading || !wallet.connected}
-                      className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
-                    >
-                      Sell
-                    </button>
+                  <div className="bg-white/5 rounded-2xl p-4 text-center">
+                    <p className="text-gray-400 text-sm">Holders</p>
+                    <p className="text-white font-bold">
+                      {selectedCoin.holdersCount}
+                    </p>
+                  </div>
+                  <div className="bg-white/5 rounded-2xl p-4 text-center">
+                    <p className="text-gray-400 text-sm">Supply</p>
+                    <p className="text-white font-bold">
+                      {selectedCoin.totalSupply?.toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="bg-white/5 rounded-2xl p-4 text-center">
+                    <p className="text-gray-400 text-sm">Circulating</p>
+                    <p className="text-white font-bold">
+                      {selectedCoin.circulatingSupply || 0}
+                    </p>
                   </div>
                 </div>
-              ))}
+              )}
             </div>
-          </div>
-        )}
 
-        <div className="bg-white/10 backdrop-blur-md rounded-xl p-8 mb-8 border border-white/20">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-3xl font-bold text-white">
-              🪙 Available Meme Coins
-            </h2>
-            <button
-              onClick={loadAvailableCoins}
-              disabled={loading}
-              className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors disabled:bg-gray-400"
-            >
-              🔄 Refresh
-            </button>
-          </div>
-          <div className="mb-4 text-sm text-gray-400">
-            Debug: Coins loaded: {coins.length} | Wallet connected:{" "}
-            {wallet.connected ? "Connected ✅" : "Disconnected ❌"} | Mounted:{" "}
-            {mounted ? "Yes ✅" : "No ❌"}
-          </div>
-          {coins.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {coins.map((coin, index) => (
-                <div
-                  key={index}
-                  className="bg-white/5 rounded-lg p-4 border border-white/20 hover:border-white/30 transition-all"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-lg font-semibold text-white">
-                      {coin.name}
-                    </h3>
-                    <span className="text-sm bg-purple-600 text-white px-2 py-1 rounded">
-                      {coin.symbol}
-                    </span>
+            {/* Trading Panel */}
+            <div className="space-y-6">
+              {/* Buy/Sell Toggle */}
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-6">
+                <div className="flex bg-white/5 rounded-2xl p-1 mb-6">
+                  <button className="flex-1 py-3 rounded-xl bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold">
+                    Buy
+                  </button>
+                  <button className="flex-1 py-3 rounded-xl text-gray-400 hover:text-white transition-colors">
+                    Sell
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Token
+                    </label>
+                    <input
+                      type="text"
+                      value={buyForm.coinName}
+                      onChange={(e) =>
+                        setBuyForm({ ...buyForm, coinName: e.target.value })
+                      }
+                      placeholder="Enter token name"
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent"
+                    />
                   </div>
-                  <div className="space-y-1 text-gray-300 text-sm">
-                    <p>
-                      Creator:{" "}
-                      <span className="text-blue-400 font-mono">
-                        {coin.creator.toString().slice(0, 8)}...
-                      </span>
-                    </p>
-                    <p>
-                      Total Supply:{" "}
-                      <span className="text-yellow-400">
-                        {coin.totalSupply.toLocaleString()}
-                      </span>
-                    </p>
-                    <p>
-                      Price:{" "}
-                      <span className="text-green-400">
-                        {coin.priceInSOL.toFixed(6)} SOL
-                      </span>
-                    </p>
-                    <p>
-                      Volume:{" "}
-                      <span className="text-purple-400">
-                        {(coin.totalVolume / LAMPORTS_PER_SOL).toFixed(2)} SOL
-                      </span>
-                    </p>
-                    <p>
-                      Holders:{" "}
-                      <span className="text-orange-400">
-                        {coin.holdersCount}
-                      </span>
-                    </p>
-                    <p
-                      className={`font-medium ${
-                        coin.isActive ? "text-green-400" : "text-red-400"
+
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Amount
+                    </label>
+                    <input
+                      type="number"
+                      value={buyForm.amount}
+                      onChange={(e) =>
+                        setBuyForm({
+                          ...buyForm,
+                          amount: parseInt(e.target.value),
+                        })
+                      }
+                      placeholder="0"
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent"
+                    />
+                  </div>
+
+                  <button
+                    onClick={() =>
+                      buyMemeCoin(buyForm.coinName, buyForm.amount)
+                    }
+                    disabled={loading || !wallet.connected}
+                    className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:from-gray-500 disabled:to-gray-600 text-white font-bold py-4 rounded-2xl transition-all duration-300 transform hover:scale-105 disabled:scale-100 shadow-lg shadow-green-500/25"
+                  >
+                    {loading ? (
+                      <div className="flex items-center justify-center">
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                        Buying...
+                      </div>
+                    ) : (
+                      "⚡ Execute Buy"
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Market List */}
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-6">
+                <h3 className="text-xl font-bold text-white mb-4">
+                  🔥 Trending Markets
+                </h3>
+                <div className="space-y-3 max-h-96 overflow-y-auto custom-scrollbar">
+                  {coins.map((coin, index) => (
+                    <div
+                      key={index}
+                      onClick={() => setSelectedCoin(coin)}
+                      className={`p-4 rounded-2xl cursor-pointer transition-all duration-300 ${
+                        selectedCoin?.name === coin.name
+                          ? "bg-gradient-to-r from-cyan-500/20 to-purple-500/20 border border-cyan-400/30"
+                          : "bg-white/5 hover:bg-white/10 border border-transparent"
                       }`}
                     >
-                      {coin.isActive ? "Active 🟢" : "Inactive 🔴"}
-                    </p>
-                  </div>
-                  {coin.isActive && (
-                    <div className="mt-4 flex gap-2">
-                      <button
-                        onClick={() => buyMemeCoin(coin.name.trim(), 1)}
-                        disabled={loading || !wallet.connected}
-                        className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
-                      >
-                        Quick Buy
-                      </button>
-                      <button
-                        onClick={() => {
-                          const userToken = userTokens.find(
-                            (t) => t.name === coin.name
-                          );
-                          if (userToken) {
-                            sellMemeCoin(
-                              coin.name.trim(),
-                              Math.min(10, userToken.balance)
-                            );
-                          }
-                        }}
-                        disabled={
-                          loading ||
-                          !wallet.connected ||
-                          !userTokens.find((t) => t.name === coin.name)
-                        }
-                        className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-3 rounded-lg transition-colors disabled:bg-gray-400"
-                      >
-                        Quick Sell
-                      </button>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-10 h-10 bg-gradient-to-br from-cyan-400 to-purple-500 rounded-full flex items-center justify-center">
+                            <span className="text-white font-bold text-sm">
+                              {coin.symbol?.charAt(0) || "?"}
+                            </span>
+                          </div>
+                          <div>
+                            <p className="text-white font-semibold">
+                              {coin.name}
+                            </p>
+                            <p className="text-gray-400 text-sm">
+                              {coin.symbol}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-white font-bold">
+                            ${coin.priceInSOL?.toFixed(6)}
+                          </p>
+                          <p className="text-green-400 text-sm">
+                            +{(Math.random() * 10) | 0}.
+                            {(Math.random() * 99) | 0}%
+                          </p>
+                        </div>
+                      </div>
                     </div>
-                  )}
+                  ))}
                 </div>
-              ))}
+              </div>
             </div>
-          ) : (
-            <div className="text-center text-gray-400 py-8">
-              <p className="text-lg mb-2">No meme coins found yet</p>
-              <p className="text-sm">
-                Create one above, or click refresh to check for existing coins!
-                🚀
-              </p>
-              <p className="text-xs mt-2 text-gray-500">
-                Debug: Coins array length: {coins.length}
-              </p>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        <div className="bg-yellow-200/20 border border-yellow-400 rounded-lg p-4 text-center">
-          <p className="text-yellow-200">
-            🔧 <strong>Development Mode:</strong> Connected to Solana Devnet
-          </p>
-          <p className="text-yellow-200 text-sm mt-2">
-            Program ID: {PROGRAM_ID.toString()}
-          </p>
+        {/* Create Token Interface */}
+        {activeTab === "create" && (
+          <div className="max-w-4xl mx-auto">
+            <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-8">
+              <div className="text-center mb-8">
+                <h2 className="text-3xl font-bold bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent mb-2">
+                  🚀 Launch Your Token
+                </h2>
+                <p className="text-gray-400">
+                  Deploy your meme coin to the quantum realm
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Token Name
+                    </label>
+                    <input
+                      type="text"
+                      value={createForm.name}
+                      onChange={(e) =>
+                        setCreateForm({ ...createForm, name: e.target.value })
+                      }
+                      placeholder="Quantum Doge"
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent transition-all"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Symbol
+                    </label>
+                    <input
+                      type="text"
+                      value={createForm.symbol}
+                      onChange={(e) =>
+                        setCreateForm({ ...createForm, symbol: e.target.value })
+                      }
+                      placeholder="QDOGE"
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent transition-all"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Metadata URI
+                    </label>
+                    <input
+                      type="text"
+                      value={createForm.uri}
+                      onChange={(e) =>
+                        setCreateForm({ ...createForm, uri: e.target.value })
+                      }
+                      placeholder="https://your-metadata.json"
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Total Supply
+                    </label>
+                    <input
+                      type="number"
+                      value={createForm.initialSupply}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          initialSupply: parseInt(e.target.value),
+                        })
+                      }
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent transition-all"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-300 text-sm font-medium mb-2">
+                      Price per Token (
+                      {(createForm.pricePerToken / LAMPORTS_PER_SOL).toFixed(6)}{" "}
+                      SOL)
+                    </label>
+                    <input
+                      type="number"
+                      value={createForm.pricePerToken}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          pricePerToken: parseInt(e.target.value),
+                        })
+                      }
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-transparent transition-all"
+                    />
+                  </div>
+
+                  <div className="bg-gradient-to-r from-cyan-500/10 to-purple-500/10 border border-cyan-400/20 rounded-2xl p-4">
+                    <h4 className="text-cyan-400 font-semibold mb-2">
+                      💰 Creator Economics
+                    </h4>
+                    <div className="space-y-1 text-sm text-gray-300">
+                      <p>• You earn SOL on every trade</p>
+                      <p>• 5% fee on sells goes to treasury</p>
+                      <p>• Tokens minted on demand</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={createMemeCoin}
+                disabled={loading || !wallet.connected}
+                className="w-full mt-8 bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 disabled:from-gray-500 disabled:to-gray-600 text-white font-bold py-4 rounded-2xl transition-all duration-300 transform hover:scale-105 disabled:scale-100 shadow-lg shadow-cyan-500/25"
+              >
+                {loading ? (
+                  <div className="flex items-center justify-center">
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                    Deploying to Quantum Realm...
+                  </div>
+                ) : (
+                  "🚀 Launch Token"
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Portfolio Interface */}
+        {activeTab === "portfolio" && (
+          <div className="space-y-6">
+            {/* Portfolio Overview */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-400/20 rounded-3xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-green-400 font-semibold">
+                    Total Portfolio Value
+                  </h3>
+                  <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
+                </div>
+                <p className="text-3xl font-bold text-white">
+                  {userTokens
+                    .reduce(
+                      (total, token) =>
+                        total +
+                        (token.balance * token.pricePerToken) /
+                          LAMPORTS_PER_SOL,
+                      0
+                    )
+                    .toFixed(4)}{" "}
+                  SOL
+                </p>
+                <p className="text-green-400 text-sm mt-1">+12.45% (24h)</p>
+              </div>
+
+              <div className="bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-400/20 rounded-3xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-blue-400 font-semibold">
+                    Active Positions
+                  </h3>
+                  <div className="w-3 h-3 bg-blue-400 rounded-full animate-pulse"></div>
+                </div>
+                <p className="text-3xl font-bold text-white">
+                  {userTokens.length}
+                </p>
+                <p className="text-blue-400 text-sm mt-1">Different tokens</p>
+              </div>
+
+              <div className="bg-gradient-to-br from-purple-500/10 to-pink-500/10 border border-purple-400/20 rounded-3xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-purple-400 font-semibold">SOL Balance</h3>
+                  <div className="w-3 h-3 bg-purple-400 rounded-full animate-pulse"></div>
+                </div>
+                <p className="text-3xl font-bold text-white">
+                  {solBalance.toFixed(4)}
+                </p>
+                <p className="text-purple-400 text-sm mt-1">
+                  Available to trade
+                </p>
+              </div>
+            </div>
+
+            {/* Holdings */}
+            {userTokens.length > 0 ? (
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-6">
+                <h3 className="text-2xl font-bold text-white mb-6">
+                  💎 Your Holdings
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {userTokens.map((token, index) => (
+                    <div
+                      key={index}
+                      className="bg-white/5 border border-white/10 rounded-2xl p-6 hover:bg-white/10 transition-all duration-300 group"
+                    >
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-12 h-12 bg-gradient-to-br from-cyan-400 to-purple-500 rounded-full flex items-center justify-center">
+                            <span className="text-white font-bold">
+                              {token.symbol?.charAt(0) || "?"}
+                            </span>
+                          </div>
+                          <div>
+                            <h4 className="text-white font-semibold">
+                              {token.name}
+                            </h4>
+                            <p className="text-gray-400 text-sm">
+                              {token.symbol}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-white font-bold">
+                            {token.balance}
+                          </p>
+                          <p className="text-gray-400 text-sm">tokens</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 mb-4">
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">Price:</span>
+                          <span className="text-yellow-400">
+                            {(token.pricePerToken / LAMPORTS_PER_SOL).toFixed(
+                              6
+                            )}{" "}
+                            SOL
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-400">Value:</span>
+                          <span className="text-green-400 font-semibold">
+                            {(
+                              (token.balance * token.pricePerToken) /
+                              LAMPORTS_PER_SOL
+                            ).toFixed(6)}{" "}
+                            SOL
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex space-x-2">
+                        <button
+                          onClick={() => buyMemeCoin(token.name.trim(), 1)}
+                          disabled={loading || !wallet.connected}
+                          className="flex-1 bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white font-semibold py-2 rounded-xl transition-all duration-300 transform group-hover:scale-105"
+                        >
+                          Buy
+                        </button>
+                        <button
+                          onClick={() =>
+                            sellMemeCoin(
+                              token.name.trim(),
+                              Math.min(10, token.balance)
+                            )
+                          }
+                          disabled={loading || !wallet.connected}
+                          className="flex-1 bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white font-semibold py-2 rounded-xl transition-all duration-300 transform group-hover:scale-105"
+                        >
+                          Sell
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-12 text-center">
+                <div className="w-24 h-24 bg-gradient-to-br from-gray-600 to-gray-800 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <span className="text-4xl">💼</span>
+                </div>
+                <h3 className="text-2xl font-bold text-white mb-2">
+                  No Holdings Yet
+                </h3>
+                <p className="text-gray-400 mb-6">
+                  Start trading to build your quantum portfolio
+                </p>
+                <button
+                  onClick={() => setActiveTab("trade")}
+                  className="bg-gradient-to-r from-cyan-500 to-purple-500 hover:from-cyan-600 hover:to-purple-600 text-white font-semibold px-8 py-3 rounded-2xl transition-all duration-300 transform hover:scale-105"
+                >
+                  Start Trading
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="mt-12 text-center">
+          <div className="bg-gradient-to-r from-yellow-500/10 to-orange-500/10 border border-yellow-400/20 rounded-2xl p-4 inline-block">
+            <p className="text-yellow-200 font-semibold">
+              ⚡ Quantum DEX v2.0 - Powered by Solana Devnet
+            </p>
+            <p className="text-yellow-400/70 text-sm mt-1">
+              Program ID: {PROGRAM_ID.toString().slice(0, 8)}...
+              {PROGRAM_ID.toString().slice(-8)}
+            </p>
+          </div>
         </div>
       </div>
-    </main>
+
+      {/* Custom Scrollbar Styles */}
+      <style jsx>{`
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(6, 182, 212, 0.5);
+          border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(6, 182, 212, 0.7);
+        }
+      `}</style>
+    </div>
   );
 }
